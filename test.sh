@@ -1,771 +1,539 @@
+#!/bin/bash
 GREEN='\e[1;32m'
 PURPLE='\e[1;35m'
 RED='\e[1;31m'
 WHITE='\e[1;37m'
 RESET='\033[0m'
-VALGRIND='valgrind --leak-check=full --track-fds=yes --show-leak-kinds=all '
+VALGRIND="valgrind --leak-check=full --track-fds=yes --show-leak-kinds=all --log-file=.julesmemlog"
 
+run_error()
+{
+	local test_desc=$1
+	shift
+	> $juleserror
+	> .julesmemlog
+	timeout 10 ${VALGRIND} ./pipex $@ 1> $julesout 2> $juleserror
+	pipex_exit=$?
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	elif [ ! -s $juleserror ] && [ ! -s $julesout ]; then
+		echo -n "❌"
+		echo -e "$test_desc: No error message found\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
 
-make fclean
-ls > ls_before
-make
-make clean
-ls > ls_after
-diff ls_before ls_after > pname
-PROGRAM=$(grep -o 'pipex[^ ]*' pname)
-clear
-echo -e "test\ntest\ntest\ntest\ngood\ngood\ngood\n\ntest\n" > julestestinfile
-mkdir julestestdir
+run_pipex_no_path()
+{
+	> $julesbashout
+	> .julesmemlog
+	> $julesdiff
+	> $julesvalcheck
+	> "$outfile"
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local outfile=$5
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	/bin/timeout 15 /bin/${VALGRIND} ./pipex "$infile" "$cmd1" "$cmd2" "$outfile" 2> /dev/null 1> /dev/null
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		/bin/echo -n "❌"
+		/bin/echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	< ""$infile"" $split1 $arg1 | $split2 $arg2 > $julesbashout 2> /dev/null
+	bash_exit=$?
+	/bin/grep --text "FILE DESCRIPTORS:" .julesmemlog  | /bin/sed 's/==[0-9]\+== //g' > $julesvalcheck
+	/bin/grep --text "ERROR SUMMARY:" .julesmemlog  | /bin/sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(/bin/grep "FILE DESCRIPTORS:" $julesvalcheck | /bin/grep -oP '\d+(?= open)')
+	std=$(/bin/grep "FILE DESCRIPTORS:" $julesvalcheck | /bin/grep -oP '(?<=\()(\d+)(?= std)')
 
-echo -e "${PURPLE}
-Valid Input
+	if ! /bin/diff $julesbashout "$outfile" > $julesdiff; then
+		/bin/echo -n "❌"
+		/bin/echo -e "$test_desc: Output incorrect\n" >> pipex_trace
+		/bin/cat $julesdiff >> pipex_trace
+	elif [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		/bin/echo -n "❌"
+		/bin/echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		/bin/echo -n "❌"
+		/bin/echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		/bin/echo -n "✅"
+	fi
+}
 
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
+run_pipex()
+{
+	#exec 2>/dev/null
+	> "$julesbashout"
+	> ".julesmemlog"
+	> "$julesdiff"
+	> "$julesvalcheck"
+	> "$outfile"
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local outfile=$5
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	timeout 15 ${VALGRIND} ./pipex "$infile" "$cmd1" "$cmd2" "$outfile"
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	< "$infile" $split1 $arg1  | $split2 $arg2 > $julesbashout
+	bash_exit=$?
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+
+	if ! diff $julesbashout "$outfile" > $julesdiff; then
+		echo -n "❌"
+		echo -e "$test_desc: Output incorrect\n" >> pipex_trace
+		cat $julesdiff >> pipex_trace
+	elif [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+run_permissions()
+{
+	> $julesbashout
+	> .julesmemlog
+	> $julesdiff
+	> $julesvalcheck
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local outfile=$5
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	timeout 15 ${VALGRIND} ./pipex "$infile" "$cmd1" "$cmd2" "$outfile" 2> /dev/null 1> /dev/null
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	< "$infile" $split1 $arg1 | $split2 $arg2 > $julesbashout 2> /dev/null
+	bash_exit=$?
+	chmod 644 "$infile"
+	chmod 644 "$outfile"
+	chmod 644 $julesbashout
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+
+	if ! diff $julesbashout "$outfile" > $julesdiff; then
+		echo -n "❌"
+		echo -e "$test_desc: Output incorrect\n" >> pipex_trace
+		cat $julesdiff >> pipex_trace
+	elif [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+run_special_case()
+{
+	> .julesmemlog
+	> $julesdiff
+	> $julesvalcheck
+	> "$outfile"
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local outfile=$5
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	timeout 15 ${VALGRIND} ./pipex "$infile" "$cmd1" "$cmd2" "$outfile" 2> /dev/null 1> /dev/null
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	< "$infile" $split1 $arg1 | $split2 $arg2 > $julesbashout 2> /dev/null
+	bash_exit=$?
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+	if [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+run_sleep()
+{
+	> .julesmemlog
+	> $julesvalcheck
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local outfile=$5
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	local start=$(date +%s)
+	timeout 15 ${VALGRIND} ./pipex "$infile" "$cmd1" "$cmd2" "$outfile" 2> /dev/null 1> /dev/null
+	pipex_exit=$?
+	local end=$(date +%s)
+	local runtime=$((end - start))
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	elif [ $runtime -lt 9 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex did not sleep long enough\n" >> pipex_trace
+		return
+	elif [ $runtime -gt 11 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex slept too long\n" >> pipex_trace
+		return
+	fi
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+	if [ -s "$outfile" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Outfile not empty\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+run_bonus()
+{
+	exec 2>/dev/null
+	> $julesbashout
+	> .julesmemlog
+	> $julesdiff
+	> $julesvalcheck
+	> "$outfile"
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$3
+	local cmd2=$4
+	local cmd3=$5
+	local outfile=$6
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	set -- $cmd3
+	local split3=$1
+	local arg3=$2
+	timeout 15 ${VALGRIND} ./pipex_bonus "$infile" "$cmd1" "$cmd2" "$cmd3" "$outfile"
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	< ""$infile"" $split1 $arg1  | $split2 $arg2  | $split3 $arg3 > $julesbashout
+	bash_exit=$?
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+
+	if ! diff $julesbashout "$outfile" > $julesdiff; then
+		echo -n "❌"
+		echo -e "$test_desc: Output incorrect\n" >> pipex_trace
+		cat $julesdiff >> pipex_trace
+	elif [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+run_heredoc()
+{
+	exec 2>/dev/null
+	> $julesbashout
+	> .julesmemlog
+	> $julesdiff
+	> $julesvalcheck
+	> "$outfile"
+	local test_desc=$1
+	local infile=$2
+	local cmd1=$4
+	local cmd2=$5
+	local outfile=$6
+	shift
+	set -- $cmd1
+	local split1=$1
+	local arg1=$2
+	set -- $cmd2
+	local split2=$1
+	local arg2=$2
+	timeout 15 ${VALGRIND} ./pipex_bonus "$infile" EOF "$cmd1" "$cmd2" "$outfile" <<EOF
+test
+test
+newline
+nottest
+EOF
+	pipex_exit=$?
+	if [ $pipex_exit -eq 124 ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Pipex timed out\n" >> pipex_trace
+		return
+	fi
+	<< EOF $split1 $arg1  | $split2 $arg2  | $split3 $arg3 > $julesbashout
+test
+test
+newline
+nottest
+EOF
+	bash_exit=$?
+	grep --text "FILE DESCRIPTORS:" .julesmemlog  | sed 's/==[0-9]\+== //g' > $julesvalcheck
+	grep --text "ERROR SUMMARY:" .julesmemlog  | sed 's/==[0-9]\+== //g' >> $julesvalcheck
+	open=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '\d+(?= open)')
+	std=$(grep "FILE DESCRIPTORS:" $julesvalcheck | grep -oP '(?<=\()(\d+)(?= std)')
+
+	if ! diff $julesbashout "$outfile" > $julesdiff; then
+		echo -n "❌"
+		echo -e "$test_desc: Output incorrect\n" >> pipex_trace
+		cat $julesdiff >> pipex_trace
+	elif [ "$pipex_exit" -ne "$bash_exit" ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Exit code incorrect" >> pipex_trace
+		echo -e "Pipex exit code: $pipex_exit\nBash exit code: $bash_exit\n" >> pipex_trace
+	elif grep -q "ERROR SUMMARY: [^0]" $julesvalcheck; then
+		echo -n "❌"
+		echo -e "$test_desc: Memory leak detected\n" >> pipex_trace
+	elif ! [ $open -eq $std ]; then
+		echo -n "❌"
+		echo -e "$test_desc: Non standard file descriptor open\n" >> pipex_trace
+	else
+		echo -n "✅"
+	fi
+}
+
+echo -e "
+${PURPLE}##############################################${RESET}
+${PURPLE}#${RESET}.${WHITE}########${RESET}..${WHITE}####${RESET}.${WHITE}########${RESET}..${WHITE}########${RESET}.${WHITE}##${RESET}.....${WHITE}##${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}##${RESET}.....${WHITE}##${RESET}..${WHITE}##${RESET}..${WHITE}##${RESET}.....${WHITE}##${RESET}.${WHITE}##${RESET}........${WHITE}##${RESET}...${WHITE}##${RESET}.${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}##${RESET}.....${WHITE}##${RESET}..${WHITE}##${RESET}..${WHITE}##${RESET}.....${WHITE}##${RESET}.${WHITE}##${RESET}.........${WHITE}##${RESET}.${WHITE}##${RESET}..${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}########${RESET}...${WHITE}##${RESET}..${WHITE}########${RESET}..${WHITE}######${RESET}......${WHITE}###${RESET}...${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}##${RESET}.........${WHITE}##${RESET}..${WHITE}##${RESET}........${WHITE}##${RESET}.........${WHITE}##${RESET}.${WHITE}##${RESET}..${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}##${RESET}.........${WHITE}##${RESET}..${WHITE}##${RESET}........${WHITE}##${RESET}........${WHITE}##${RESET}...${WHITE}##${RESET}.${PURPLE}#${RESET}
+${PURPLE}#${RESET}.${WHITE}##${RESET}........${WHITE}####${RESET}.${WHITE}##${RESET}........${WHITE}########${RESET}.${WHITE}##${RESET}.....${WHITE}##${PURPLE}#${RESET}
+${PURPLE}##############################################${RESET}
+"
+
+trap "rm -rf $julestestinfile $julestestdir $julesbashout .julesmemlog $juleserror $julesvalcheck $julesdiff $julesout $julestestoutfile $julestestoutfile2 .julestestexe.c ../.julestestexe $current_dir/$julestestdir.julestestexe .script.sh" EXIT
+
+if [ ! -f "./pipex" ]; then
+	echo -e "${RED}Executable not found. Aborting test...\n${RESET}"
+	exit 1
 fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
+if [ -f "pipex_trace" ]; then
+	echo -e "\n============================================================\n" >> pipex_trace
 fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
+echo -e "----- TRACE BEGINS -----\n" >> pipex_trace
 
+julestestinfile=$(mktemp)
+julestestdir=$(mktemp -d)
+julesbashout=$(mktemp)
+juleserror=$(mktemp)
+julesvalcheck=$(mktemp)
+julesdiff=$(mktemp)
+julesout=$(mktemp)
+julestestoutfile=$(mktemp)
 
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Outfile Doesn't Exist
+echo -e "test\ntest\ntest\ntest\ngood\ngood\ngood\n\ntest\n" > $julestestinfile
+echo -e "${PURPLE}--- ${WHITE}Basic Error Tests${PURPLE} ---\n${RESET}"
+echo -e "-- Basic Error Tests --\n" >> pipex_trace
 
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" julestestoutfile2 
-echo $? > julestestexit
-< julestestinfile grep e | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile2 julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
+run_error "No arguments"
+run_error "Too few arguments" $julestestinfile "wc -l" $julestestoutfile
+run_error "Too many arguments" $julestestinfile "grep e" "wc -l" "wc -w" $julestestoutfile
+echo -e "\n"
 
+rm -rf $juleserror $julesvalcheck .julesmemlog $julestestoutfile $julesout
 
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e  "${PURPLE}
-Infile Doesn't Exist
+echo -e "${PURPLE}--- ${WHITE}Basic Tests${PURPLE} ---\n${RESET}"
+echo -e "-- Basic Tests --\n" >> pipex_trace
 
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile2 "grep e" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile2 grep e | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
+run_pipex "Valid Input" $julestestinfile "grep e" "wc -l" $julestestoutfile
+run_pipex "Infile doesn't exist" .julestestinfile2 "grep e" "wc -l" $julestestoutfile
+run_pipex "Outfile doesn't exist" $julestestinfile "grep e" "wc -l" $julestestoutfile2
+run_pipex "Command 1 doesn't exist" $julestestinfile "a" "wc -l" $julestestoutfile
+run_pipex "Command 2 doesn't exist" $julestestinfile "grep e" "a" $julestestoutfile
+run_pipex "Neither command exists" $julestestinfile "a" "a" $julestestoutfile
 
+chmod 111 $julestestinfile
+run_permissions "Infile permissions removed" $julestestinfile "grep e" "wc -l" $julestestoutfile
+> $julestestoutfile
+> $julesbashout
+chmod 111 $julesbashout
+chmod 111 $julestestoutfile
+run_permissions "Outfile permissions removed" $julestestinfile "grep e" "wc -l" $julestestoutfile
+run_pipex "Quoted argument" $julestestinfile "grep 'quote this'" "wc -l" $julestestoutfile
+run_pipex "Command 1 empty" $julestestinfile "" "wc -l" $julestestoutfile
+run_pipex "Command 2 empty" $julestestinfile "grep e" "" $julestestoutfile
+run_pipex "Both commands empty" $julestestinfile "" "" $julestestoutfile
+run_special_case "All input empty" "" "" "" ""
+temp=$PATH
+unset $PATH
+run_pipex_no_path "No PATH variable" $julestestinfile "grep test" "wc -l" $julestestoutfile
+export "PATH=$temp"
+echo -e "\n"
 
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Command 1 Doesn't Exist
+rm -rf $julesbashout .julesmemlog $julesdiff $julesvalcheck $julestestoutfile2 
 
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "a" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile a | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
+echo -e "${PURPLE}--- ${WHITE}File Type Tests${PURPLE} ---\n${RESET}"
+echo -e "-- File Type Tests --\n" >> pipex_trace
 
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Command 2 Doesn't Exist
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "a" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | a > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Neither Command Exists
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "a" "a" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile a | a > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Multiple Commands
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" "wc -w" julestestoutfile 
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-echo -e "${GREEN}\nExit Code Not Tested\n${RESET}"
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-bash -c "
-GREEN='\e[1;32m'
-PURPLE='\e[1;35m'
-RED='\e[1;31m'
-RESET='\033[0m'
-VALGRIND='valgrind --leak-check=full --track-fds=yes --show-leak-kinds=all '
-PROGRAM='./pipex'
-unset PATH
-/bin/echo -e '${PURPLE}
-Unset Path Test
-
-${RESET}'
-/bin/echo -n > julestestoutfile
-/bin/echo -n > julestestfile
-/bin/echo -n > julestestexit
-/bin/${VALGRIND}./${PROGRAM} julestestinfile cat cat julestestoutfile | /bin/echo $? > julestestexit
-< julestestinfile cat | cat > julestestfile | /bin/echo $? >> julestestexit
-if [ ! -s julestestoutfile ]; then
-    /bin/echo -e '${GREEN}\nOutput Correct\n${RESET}'
-else
-    /bin/echo -e '${RED}\nOutput Incorrect\n${RESET}'
-fi
-if /bin/diff <(/bin/sed -n '1p' julestestexit) <(/bin/sed -n '2p' julestestexit); then
-    /bin/echo -e '${GREEN}\nExit Code Correct\n${RESET}'
-else
-    /bin/echo -e '${RED}\nExit Code Incorrect\n${RESET}'
-fi
-/bin/echo -e '${PURPLE}
-----------------------------------------
-${RESET}'"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Infile Permissions Removed
-
-${RESET}"
-chmod 111 julestestinfile
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | wc -l > julestestfile
-echo $? >> julestestexit
-chmod 777 julestestinfile
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Outfile Permissions Removed
-
-${RESET}"
-chmod 111 julestestoutfile
-chmod 111 julestestfile
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | wc -l > julestestfile
-echo $? >> julestestexit
-chmod 777 julestestoutfile
-chmod 777 julestestfile
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Relative Path
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
+run_pipex "Command 1 is a directory" $julestestinfile "$julestestdir" "wc -l" $julestestoutfile
+run_pipex "Command 2 is a directory" $julestestinfile "grep e" "$julestestdir" $julestestoutfile
+run_pipex "Both commands are directories" $julestestinfile "$julestestdir" "$julestestdir" $julestestoutfile
+run_pipex "Infile is a directory" $julestestdir "grep e" "wc -l" $julestestoutfile
+run_special_case "Outfile is a directory" $julestestinfile "grep e" "wc -l" $julestestdir
+run_special_case "Both files ar directories" $julestestdir "grep e" "wc -l" $julestestdir
+run_special_case "All input are directories" $julestestdir $julestestdir $julestestdir $julestestdir
 echo '#include <stdio.h>
 
 int main()
 {
 	printf("This\nis\na\ntest\nprogram\n");
 	return (0);
-}' > julestestexe.c
-cc julestestexe.c -o ../julestestexe
-${VALGRIND}./${PROGRAM} julestestinfile ".././julestestexe" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile .././julestestexe | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Absolute Path
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
+}' > .julestestexe.c
+cc julestestexe.c -o ../.julestestexe
+run_pipex "Command 1 is a relative path" $julestestinfile "../.julestestexe" "wc -l" $julestestoutfile # relative path test
+rm -rf .././.julestestexe
 current_dir=$(pwd)
-cc julestestexe.c -o "$current_dir/julestestdir/julestestexe"
-${VALGRIND}./${PROGRAM} julestestinfile "$current_dir/julestestdir/julestestexe" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile $current_dir/julestestdir/julestestexe | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Script as Command
-
-${RESET}"
+cc julestestexe.c -o "$current_dir/$julestestdir.julestestexe"
+run_pipex "Command 1 is an absolute path" $julestestinfile "$current_dir/$julestestdir.julestestexe" "wc -l" $julestestoutfile # absolute path
+rm -rf "$current_dir/.julestestdir
 echo "#!/bin/bash
-echo HELLO" > script.sh
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "sh script.sh" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile sh script.sh | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
+echo HELLO > .script.sh
+run_pipex "Command 1 is a script" $julestestinfile "sh .script.sh" "wc -l" $julestestoutfile # script as cmd
+rm -rf .script.sh
+echo -e "\n"
+
+echo -e "${PURPLE}--- ${WHITE}Sleep Tests${PURPLE} ---\n${RESET}"
+echo -e "-- Sleep Tests --\n" >> pipex_trace
+
+#run_sleep "Both commands are sleep 10" $julestestinfile "sleep 10" "sleep 10" $julestestoutfile # sleep test same
+#run_sleep "Command 1 is sleep 10, command 2 is sleep 5" $julestestinfile "sleep 10" "sleep 5" $julestestoutfile # sleep diff
+#run_sleep "Command 1 is sleep 5, command 2 is sleep 10" $julestestinfile "sleep 5" "sleep 10" $julestestoutfile
+echo -e "\n"
+
+rm -rf $julestestinfile $julestestoutfile .julesmemlog $julesvalcheck .julestestexe.c
+
+if [ -f "./pipex_bonus" ]; then
+	echo -e "${PURPLE}--- ${WHITE}Bonus Tests${PURPLE} ---\n${RESET}"
+	echo -e "-- Bonus Tests --\n" >> pipex_trace
+
+	run_bonus "3 Commands" $julestestinfile "grep e" "wc -l" "wc -w" $julestestoutfile
+	run_heredoc "heredoc" "heredoc" "grep test" "wc -l" $julestestoutfile
+
 fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
 
+echo -e "---- TRACE ENDS ----" >> pipex_trace
+echo -e "${PURPLE}--- ${WHITE}Testing complete: pipex_trace created${PURPLE} ---\n${RESET}"
 
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Insufficient Commands
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "wc -l" julestestoutfile
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-echo -e "${GREEN}\nExit Code Not Tested\n${RESET}"
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Excessive Commands
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" "wc -w" julestestoutfile
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-echo -e "${GREEN}\nExit Code Not Tested\n${RESET}"
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Quoted Argument
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "grep 'quote this'" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep 'quote this' | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Command 1 Empty
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile "" | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Command 2 Empty
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | "" > julestestfile
-echo $? >> julestestexit
-if [ ! -s julestestoutfile ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Both Commands Empty
-
-${RESET}"
-${VALGRIND}./${PROGRAM} julestestinfile "" "" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile "" | "" > julestestfile
-echo $? >> julestestexit
-if [ ! -s julestestoutfile ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-All Blank Input
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} "" "" "" "" 
-echo $? > julestestexit
-< "" "" | "" > ""
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-First Command is Directory
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "julestestdir/" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile julestestdir/ | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Second Command is Directory
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "julestestdir/" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile grep e | julestestdir/ > julestestfile
-echo $? >> julestestexit
-if [ ! -s julestestoutfile ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-
-echo -e "${PURPLE}
-Both Commands are Directories
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "julestestdir/" "julestestdir/" julestestoutfile 
-echo $? > julestestexit
-< julestestinfile julestestdir/ | julestestdir/ > julestestfile
-echo $? >> julestestexit
-if [ ! -s julestestoutfile ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Infile is Directory
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestdir/ "grep e" "wc -l" julestestoutfile 
-echo $? > julestestexit
-< julestestdir/ grep e | wc -l > julestestfile
-echo $? >> julestestexit
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Outfile is Directory
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestinfile "grep e" "wc -l" julestestdir/ 
-echo $? > julestestexit
-< julestestfile grep e | wc -l > julestestdir/
-echo $? >> julestestexit
-if [ ! -f julestestdir/ ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Both Files are Directories
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestdir/ "grep e" "wc -l" julestestdir/ 
-echo $? > julestestexit
-< julestestdir/ grep e | wc -l > julestestdir/
-echo $? >> julestestexit
-if [ ! -f julestestdir/ ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -e "${PURPLE}
-Everything is a Directory
-
-${RESET}"
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-${VALGRIND}./${PROGRAM} julestestdir/ julestestdir/ julestestdir/ julestestdir/ 
-echo $? > julestestexit
-< julestestdir/ julestestdir/ | julestestdir/ > julestestdir/
-echo $? >> julestestexit
-if [ ! -f julestestdir/ ]; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-if diff <(sed -n '1p' julestestexit) <(sed -n '2p' julestestexit); then
-    echo -e "${GREEN}\nExit Code Correct\n${RESET}"
-else
-    echo -e "${RED}\nExit Code Incorrect\n${RESET}"
-fi
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Sleep Test (Same Values)
-${RESET}"
-while true; do
-    echo -ne "${PURPLE}$(date +'%T')\r${RESET}"
-    sleep 1
-done &
-${VALGRIND}./${PROGRAM} julestestinfile "sleep 10" "sleep 10" julestestoutfile
-kill $!
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-echo -e "${GREEN}\nExit Code Not Tested\n${RESET}"
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-
-echo -n > julestestoutfile
-echo -n > julestestfile
-echo -n > julestestexit
-echo -e "${PURPLE}
-Sleep Test (Different Values)
-${RESET}"
-while true; do
-    echo -ne "${PURPLE}$(date +'%T')\r${RESET}"
-    sleep 1
-done &
-${VALGRIND}./${PROGRAM} julestestinfile "sleep 10" "sleep 5" julestestoutfile
-kill $!
-if diff julestestoutfile julestestfile; then
-    echo -e "${GREEN}\nOutput Correct\n${RESET}"
-else
-    echo -e "${RED}\nOutput Incorrect\n${RESET}"
-fi
-echo -e "${GREEN}\nExit Code Not Tested\n${RESET}"
-echo -e "${PURPLE}
-----------------------------------------
-${RESET}"
-
-rm -rf julestestinfile julestestoutfile julestestoutfile2 julestestfile ../julestestexe julestestdir/julestestexe julestestexe.c script.sh julestestdir/ ls_before ls_after pname julestestexit
+# Created by Jules Pierce @ Hive Helsinki 2025/02/20 - https://github.com/Jules478
