@@ -21,7 +21,7 @@ The mandatory and bonus testers are mostly the same with a few key differences. 
 
 ## How to Run the Tester
 
-The tester is completely self contained. Simply place the tester in the root directory for your pipex and run the script (ex. "bash test.sh") and the tester will automatically compile a fresh copy of your program and begin running the tests. It will generate files with which to test (not all of which will be in the root directory) so it's recommended to let the script finish completely so it can remove these files automatically. The bonus version also works the same way with the exception of the final test (here_doc) which will ask for user input. Instructions are provided mid-run. 
+Place the script alongside your pipex executable and run the script. The tester will generate all the files it needs to run the tests and will clean them up afterwards itself. It is recommended to not interrupt the tester mid run. 
 
 > [!NOTE]
 > This tester is not a definitive guide on the functionality of pipex. This is only my own personal tests. There may be edge cases that are not considered here. 
